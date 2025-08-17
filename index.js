@@ -10,10 +10,10 @@ const PORT = process.env.PORT || 3001;
 // Cache untuk MX record lookups (TTL 1 jam)
 const mxCache = new NodeCache({ stdTTL: 3600 });
 
-// Rate limiting
+// Rate limiting yang lebih longgar untuk batch processing
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 menit
-    max: 100, // maksimal 100 request per IP
+    max: 1000, // naikkan untuk batch processing
     message: 'Too many requests from this IP, please try again later.',
     standardHeaders: true,
     legacyHeaders: false,
@@ -60,9 +60,15 @@ app.get('/docs', (req, res) => {
                 description: 'Health check endpoint',
                 response: 'object with system status'
             },
+            '/validate-batch': {
+                method: 'POST',
+                description: 'Validate emails in batch (max 1000 per request)',
+                body: { emails: ['email1@example.com', 'email2@example.com'] },
+                response: 'JSON array of validation results'
+            },
             '/validate-stream': {
                 method: 'GET',
-                description: 'Validate emails with Server-Sent Events',
+                description: 'Validate emails with Server-Sent Events (max 100 per request)',
                 parameters: {
                     emails: 'comma-separated email list via query string'
                 },
@@ -71,27 +77,20 @@ app.get('/docs', (req, res) => {
         },
         rateLimit: {
             window: '15 minutes',
-            maxRequests: 100
+            maxRequests: 1000
         }
     });
 });
 
 function isEmailFormatValid(email) {
-    // Validasi lebih ketat dengan RFC 5322 compliant regex
-    const re = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-    
-    // Validasi panjang email (maks 254 karakter)
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (email.length > 254) return false;
-    
-    // Validasi panjang domain (maks 253 karakter)
     const domain = email.split('@')[1];
     if (domain && domain.length > 253) return false;
-    
     return re.test(email);
 }
 
 async function hasMXRecord(domain) {
-    // Cek cache dulu
     const cacheKey = `mx_${domain}`;
     const cached = mxCache.get(cacheKey);
     if (cached !== undefined) {
@@ -100,9 +99,7 @@ async function hasMXRecord(domain) {
 
     try {
         const mx = await dns.resolveMx(domain);
-        const hasRecords = mx.length > 0;
-        
-        // Simpan ke cache
+        const hasRecords = mx && mx.length > 0;
         mxCache.set(cacheKey, hasRecords);
         return hasRecords;
     } catch (error) {
@@ -127,7 +124,6 @@ async function validateEmail(email) {
     }
 
     const isPublicDomain = PUBLIC_DOMAINS.includes(domain);
-    
     if (!isPublicDomain) {
         type = 'pro';
     }
@@ -152,32 +148,55 @@ async function validateEmail(email) {
     };
 }
 
-async function pMap(array, fn, concurrency = Infinity) {
-    const results = [];
-    const running = [];
-    for (const item of array) {
-        const p = Promise.resolve(fn(item)).finally(() => {
-            const index = running.indexOf(p);
-            if (index !== -1) { running.splice(index, 1); }
+// Batch validation endpoint untuk jumlah besar
+app.post('/validate-batch', async (req, res) => {
+    const { emails } = req.body;
+    
+    if (!emails || !Array.isArray(emails) || emails.length === 0) {
+        return res.status(400).json({ 
+            error: 'emails must be an array of email strings',
+            example: { emails: ['test@example.com', 'test2@example.com'] }
         });
-        running.push(p);
-        results.push(p);
-        if (running.length >= concurrency) { await Promise.race(running); }
     }
-    return Promise.all(results);
-}
 
-app.get('/ping', (req, res) => {
-    res.json({ 
-        message: 'Server aktif dan siap digunakan',
-        timestamp: new Date().toISOString()
-    });
+    if (emails.length > 1000) {
+        return res.status(400).json({ 
+            error: 'Maximum 1000 emails per request allowed' 
+        });
+    }
+
+    try {
+        const results = [];
+        const CONCURRENCY_LIMIT = 50;
+        
+        // Process in chunks to avoid memory issues
+        for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
+            const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
+            const chunkResults = await Promise.all(
+                chunk.map(email => validateEmail(email.trim()))
+            );
+            results.push(...chunkResults);
+        }
+
+        res.json({
+            total: results.length,
+            results,
+            summary: {
+                deliverable: results.filter(r => r.result === 'deliverable').length,
+                undeliverable: results.filter(r => r.result === 'undeliverable').length,
+                invalid_format: results.filter(r => r.result === 'invalid_format').length
+            }
+        });
+    } catch (error) {
+        console.error('Error in validate-batch:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
+// Streaming endpoint untuk jumlah sedang
 app.get('/validate-stream', async (req, res) => {
     const emails = req.query.emails?.split(',') || [];
     
-    // Validasi input lebih ketat
     if (!emails || !Array.isArray(emails) || emails.length === 0) {
         return res.status(400).json({ 
             error: 'emails must be a comma-separated array via query string',
@@ -185,10 +204,9 @@ app.get('/validate-stream', async (req, res) => {
         });
     }
 
-    // Batasi jumlah email per request
     if (emails.length > 100) {
         return res.status(400).json({ 
-            error: 'Maximum 100 emails per request allowed' 
+            error: 'Maximum 100 emails per streaming request. Use POST /validate-batch for larger batches.' 
         });
     }
 
@@ -198,23 +216,28 @@ app.get('/validate-stream', async (req, res) => {
     res.flushHeaders();
 
     const CONCURRENCY_LIMIT = 20;
-    const DELAY_MS = 50;
+    const DELAY_MS = 10; // lebih cepat untuk streaming
     
-    console.log(`Mulai memvalidasi ${emails.length} email dengan jeda ${DELAY_MS}ms.`);
+    console.log(`Mulai memvalidasi ${emails.length} email dengan streaming`);
     
     try {
-        await pMap(emails, async (email) => {
-            try {
-                const result = await validateEmail(email.trim());
-                console.log(`📬 ${result.email.padEnd(35)} → ${result.result.toUpperCase()} (${result.score})`);
+        const processChunk = async (chunk) => {
+            const results = await Promise.all(
+                chunk.map(email => validateEmail(email.trim()))
+            );
+            
+            for (const result of results) {
                 res.write(`data: ${JSON.stringify(result)}\n\n`);
-                await new Promise(r => setTimeout(r, DELAY_MS));
-            } catch (err) {
-                console.error(`Error memvalidasi email: ${email}`, err);
-                res.write(`data: ${JSON.stringify({ email, result: 'error', reason: err.message })}\n\n`);
             }
-        }, CONCURRENCY_LIMIT);
-        
+        };
+
+        // Process in chunks
+        for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
+            const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
+            await processChunk(chunk);
+            await new Promise(r => setTimeout(r, DELAY_MS));
+        }
+
         res.write('event: done\ndata: selesai\n\n');
         res.end();
     } catch (error) {
@@ -231,6 +254,13 @@ app.get('/cache-stats', (req, res) => {
             keys: mxCache.keys().length,
             stats: mxCache.getStats()
         }
+    });
+});
+
+app.get('/ping', (req, res) => {
+    res.json({ 
+        message: 'Server aktif dan siap digunakan',
+        timestamp: new Date().toISOString()
     });
 });
 
