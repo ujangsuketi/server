@@ -7,6 +7,12 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// --- KREDENSIAL BASIC AUTH (HANYA UNTUK SEMENTARA DAN TIDAK AMAN) ---
+// SEHARUSNYA MENGGUNAKAN ENVIRONMENT VARIABLES (.env) UNTUK KEAMANAN
+const AUTH_USERNAME = 'kamu'; // GANTI DENGAN USERNAME PILIHANMU
+const AUTH_PASSWORD = 'apawekepo'; // GANTI DENGAN PASSWORD PILIHANMU
+// --- AKHIR KREDENSIAL ---
+
 // Cache untuk MX record lookups (TTL 1 jam)
 const mxCache = new NodeCache({ stdTTL: 3600 });
 
@@ -19,10 +25,44 @@ const limiter = rateLimit({
     legacyHeaders: false,
 });
 
+// Middleware untuk Basic Authentication
+function basicAuthMiddleware(req, res, next) {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+        // Jika tidak ada header Authorization, minta kredensial
+        res.setHeader('WWW-Authenticate', 'Basic realm="Akses Terbatas"');
+        return res.status(401).send('Akses Dibutuhkan');
+    }
+
+    const [scheme, credentials] = authHeader.split(' '); // Memisahkan 'Basic' dan kredensial base64
+    
+    if (scheme.toLowerCase() !== 'basic') {
+        return res.status(401).send('Skema autentikasi tidak didukung');
+    }
+
+    // Decode kredensial dari Base64 (format: username:password)
+    const decodedCredentials = Buffer.from(credentials, 'base64').toString('utf8');
+    const [username, password] = decodedCredentials.split(':');
+
+    // Cek kredensial
+    if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+        next(); // Kredensial benar, lanjutkan ke route
+    } else {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Akses Terbatas"');
+        res.status(401).send('Kredensial Tidak Valid');
+    }
+}
+
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // naikkan limit body size
-app.use(limiter);
+
+// 🚀 Terapkan middleware Basic Authentication ke semua route
+app.use(basicAuthMiddleware);
+
+app.use(limiter); // Rate limiter setelah autentikasi
 
 const PUBLIC_DOMAINS = [
     'hotmail.com',
