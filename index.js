@@ -13,7 +13,7 @@ const mxCache = new NodeCache({ stdTTL: 3600 });
 // Rate limiting yang lebih longgar untuk batch processing
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 menit
-    max: 1000, // naikkan untuk batch processing
+    max: 10000, // naikkan untuk batch processing besar
     message: 'Too many requests from this IP, please try again later.',
     standardHeaders: true,
     legacyHeaders: false,
@@ -21,7 +21,7 @@ const limiter = rateLimit({
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // naikkan limit body size
 app.use(limiter);
 
 const PUBLIC_DOMAINS = [
@@ -62,13 +62,13 @@ app.get('/docs', (req, res) => {
             },
             '/validate-batch': {
                 method: 'POST',
-                description: 'Validate emails in batch (max 1000 per request)',
+                description: 'Validate emails in batch (max 10000 per request)',
                 body: { emails: ['email1@example.com', 'email2@example.com'] },
                 response: 'JSON array of validation results'
             },
             '/validate-stream': {
                 method: 'GET',
-                description: 'Validate emails with Server-Sent Events (max 100 per request)',
+                description: 'Validate emails with Server-Sent Events (max 1000 per request)',
                 parameters: {
                     emails: 'comma-separated email list via query string'
                 },
@@ -77,7 +77,7 @@ app.get('/docs', (req, res) => {
         },
         rateLimit: {
             window: '15 minutes',
-            maxRequests: 1000
+            maxRequests: 10000
         }
     });
 });
@@ -148,7 +148,7 @@ async function validateEmail(email) {
     };
 }
 
-// Batch validation endpoint untuk jumlah besar
+// Batch validation endpoint untuk jumlah besar dengan chunking
 app.post('/validate-batch', async (req, res) => {
     const { emails } = req.body;
     
@@ -159,23 +159,41 @@ app.post('/validate-batch', async (req, res) => {
         });
     }
 
-    if (emails.length > 1000) {
+    if (emails.length > 10000) {
         return res.status(400).json({ 
-            error: 'Maximum 1000 emails per request allowed' 
+            error: 'Maximum 10000 emails per request allowed' 
         });
     }
 
     try {
         const results = [];
-        const CONCURRENCY_LIMIT = 50;
+        const CONCURRENCY_LIMIT = 100; // lebih agresif untuk kecepatan
+        
+        console.log(`Processing ${emails.length} emails in batches...`);
         
         // Process in chunks to avoid memory issues
         for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
             const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
-            const chunkResults = await Promise.all(
+            const chunkResults = await Promise.allSettled(
                 chunk.map(email => validateEmail(email.trim()))
             );
-            results.push(...chunkResults);
+            
+            const processedResults = chunkResults.map((result, index) => {
+                if (result.status === 'fulfilled') {
+                    return result.value;
+                } else {
+                    return {
+                        email: chunk[index],
+                        result: 'error',
+                        reason: result.reason.message || 'Validation failed'
+                    };
+                }
+            });
+            
+            results.push(...processedResults);
+            
+            // Log progress
+            console.log(`Processed ${Math.min(i + CONCURRENCY_LIMIT, emails.length)}/${emails.length} emails`);
         }
 
         res.json({
@@ -184,16 +202,17 @@ app.post('/validate-batch', async (req, res) => {
             summary: {
                 deliverable: results.filter(r => r.result === 'deliverable').length,
                 undeliverable: results.filter(r => r.result === 'undeliverable').length,
-                invalid_format: results.filter(r => r.result === 'invalid_format').length
+                invalid_format: results.filter(r => r.result === 'invalid_format').length,
+                error: results.filter(r => r.result === 'error').length
             }
         });
     } catch (error) {
         console.error('Error in validate-batch:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });
 
-// Streaming endpoint untuk jumlah sedang
+// Streaming endpoint untuk jumlah besar dengan chunking
 app.get('/validate-stream', async (req, res) => {
     const emails = req.query.emails?.split(',') || [];
     
@@ -204,29 +223,42 @@ app.get('/validate-stream', async (req, res) => {
         });
     }
 
-    if (emails.length > 100) {
+    if (emails.length > 1000) {
         return res.status(400).json({ 
-            error: 'Maximum 100 emails per streaming request. Use POST /validate-batch for larger batches.' 
+            error: 'Maximum 1000 emails per streaming request. Use POST /validate-batch for larger batches.' 
         });
     }
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.flushHeaders();
 
-    const CONCURRENCY_LIMIT = 20;
-    const DELAY_MS = 10; // lebih cepat untuk streaming
+    const CONCURRENCY_LIMIT = 50;
+    const DELAY_MS = 5; // lebih cepat
     
     console.log(`Mulai memvalidasi ${emails.length} email dengan streaming`);
     
     try {
         const processChunk = async (chunk) => {
-            const results = await Promise.all(
+            const chunkResults = await Promise.allSettled(
                 chunk.map(email => validateEmail(email.trim()))
             );
             
-            for (const result of results) {
+            const processedResults = chunkResults.map((result, index) => {
+                if (result.status === 'fulfilled') {
+                    return result.value;
+                } else {
+                    return {
+                        email: chunk[index],
+                        result: 'error',
+                        reason: result.reason.message || 'Validation failed'
+                    };
+                }
+            });
+            
+            for (const result of processedResults) {
                 res.write(`data: ${JSON.stringify(result)}\n\n`);
             }
         };
@@ -235,14 +267,18 @@ app.get('/validate-stream', async (req, res) => {
         for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
             const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
             await processChunk(chunk);
-            await new Promise(r => setTimeout(r, DELAY_MS));
+            
+            // Small delay to prevent overwhelming
+            if (i + CONCURRENCY_LIMIT < emails.length) {
+                await new Promise(r => setTimeout(r, DELAY_MS));
+            }
         }
 
         res.write('event: done\ndata: selesai\n\n');
         res.end();
     } catch (error) {
         console.error('Error in validate-stream:', error);
-        res.write(`data: ${JSON.stringify({ error: 'Internal server error' })}\n\n`);
+        res.write(`data: ${JSON.stringify({ error: 'Internal server error', details: error.message })}\n\n`);
         res.end();
     }
 });
@@ -264,8 +300,18 @@ app.get('/ping', (req, res) => {
     });
 });
 
+// Error handling untuk memory issues
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📊 Health check: http://localhost:${PORT}/health`);
     console.log(`📚 API docs: http://localhost:${PORT}/docs`);
+    console.log(`💾 Memory limit: ${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)}MB`);
 });
