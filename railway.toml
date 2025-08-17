@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm ci"
+buildCommand = "npm ci --no-cache"
 
 [deploy]
 startCommand = "npm start"
