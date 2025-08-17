@@ -1,12 +1,13 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Email validation service",
   "main": "index.js",
- "scripts": {
-  "start": "node index.js"
-},
-  "keywords": [],
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["email", "validation", "mx", "dns"],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -14,9 +15,10 @@
     "cors": "^2.8.5",
     "dotenv": "^17.0.1",
     "express": "^5.1.0",
-    "smtp-connection": "^4.0.2",
     "express-rate-limit": "^7.5.0",
     "node-cache": "^5.1.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
-  
 }
