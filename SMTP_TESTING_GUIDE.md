@@ -12,7 +12,7 @@ Telah ditambahkan fitur baru untuk testing SMTP configuration dengan bounce chec
 ```json
 {
   "email": "info@asdasdf.site",
-  "password": "2bUQEqjO_bpx",
+  "password": "2bUQEqjO_bsx",
   "host": "mail.asdasdf.site",
   "port": 465
 }
@@ -49,7 +49,7 @@ Telah ditambahkan fitur baru untuk testing SMTP configuration dengan bounce chec
 ```json
 {
   "email": "info@asdasdf.site",
-  "password": "2bUQEqjO_bpx",
+  "password": "2bUQEqjO_bsxx",
   "host": "mail.asdasdf.site",
   "port": 465
 }
@@ -116,7 +116,7 @@ curl -X POST http://localhost:3001/validate-smtp-config \
   -H "Content-Type: application/json" \
   -d '{
     "email": "info@asdasdf.site",
-    "password": "2bUQEqjO_bpx",
+    "password": "2bUQEqjO_bsx",
     "host": "mail.asdasdf.site",
     "port": 465
   }'
@@ -130,7 +130,7 @@ const testSMTP = async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email: 'info@asdasdf.site',
-      password: '2bUQEqjO_bpx',
+      password: '2bUQEqjO_bsxx',
       host: 'mail.asdasdf.site',
       port: 465
     })
