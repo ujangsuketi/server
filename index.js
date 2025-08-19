@@ -3,6 +3,7 @@ const cors = require('cors');
 const dns = require('dns').promises;
 const NodeCache = require('node-cache');
 const rateLimit = require('express-rate-limit');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -290,6 +291,155 @@ app.get('/cache-stats', (req, res) => {
             keys: mxCache.keys().length,
             stats: mxCache.getStats()
         }
+    });
+});
+
+// SMTP Configuration Validation and Testing with Boundary Check
+function validateSMTPConfig(config) {
+    const errors = [];
+    
+    // Boundary checks for SMTP configuration
+    if (!config.email || typeof config.email !== 'string' || config.email.length > 254) {
+        errors.push('Email must be a valid string (max 254 chars)');
+    }
+    
+    if (!config.password || typeof config.password !== 'string' || config.password.length < 1 || config.password.length > 512) {
+        errors.push('Password must be a valid string (1-512 chars)');
+    }
+    
+    if (!config.host || typeof config.host !== 'string' || config.host.length < 3 || config.host.length > 253) {
+        errors.push('Host must be a valid string (3-253 chars)');
+    }
+    
+    if (!config.port || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+        errors.push('Port must be a valid integer (1-65535)');
+    }
+    
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (config.email && !emailRegex.test(config.email)) {
+        errors.push('Invalid email format');
+    }
+    
+    // Validate host format
+    const hostRegex = /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (config.host && !hostRegex.test(config.host)) {
+        errors.push('Invalid host format');
+    }
+    
+    return errors;
+}
+
+async function testSMTPConnection(config) {
+    try {
+        // Validate configuration first
+        const validationErrors = validateSMTPConfig(config);
+        if (validationErrors.length > 0) {
+            return {
+                success: false,
+                errors: validationErrors,
+                message: 'Configuration validation failed'
+            };
+        }
+        
+        // Create transporter with boundary-checked configuration
+        const transporter = nodemailer.createTransporter({
+            host: config.host,
+            port: config.port,
+            secure: config.port === 465, // SSL for port 465
+            auth: {
+                user: config.email,
+                pass: config.password
+            },
+            timeout: 10000, // 10 second timeout
+            connectionTimeout: 5000, // 5 second connection timeout
+            greetingTimeout: 5000, // 5 second greeting timeout
+            socketTimeout: 10000 // 10 second socket timeout
+        });
+        
+        // Verify connection with boundary checks
+        const verifyResult = await transporter.verify();
+        
+        return {
+            success: true,
+            message: 'SMTP connection successful',
+            config: {
+                email: config.email,
+                host: config.host,
+                port: config.port,
+                secure: config.port === 465
+            },
+            verifyResult
+        };
+        
+    } catch (error) {
+        return {
+            success: false,
+            message: 'SMTP connection failed',
+            error: error.message,
+            code: error.code
+        };
+    }
+}
+
+// SMTP Test endpoint with boundary check
+app.post('/test-smtp', async (req, res) => {
+    const { email, password, host, port } = req.body;
+    
+    // Input boundary check
+    if (!email || !password || !host || !port) {
+        return res.status(400).json({
+            error: 'Missing required fields',
+            required: ['email', 'password', 'host', 'port'],
+            example: {
+                email: 'info@asdasdf.site',
+                password: '2bUQEqjO_bpx',
+                host: 'mail.asdasdf.site',
+                port: 465
+            }
+        });
+    }
+    
+    const config = {
+        email: String(email).trim(),
+        password: String(password),
+        host: String(host).trim(),
+        port: parseInt(port)
+    };
+    
+    try {
+        const result = await testSMTPConnection(config);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// SMTP Configuration validation endpoint
+app.post('/validate-smtp-config', (req, res) => {
+    const { email, password, host, port } = req.body;
+    
+    const config = {
+        email: String(email || '').trim(),
+        password: String(password || ''),
+        host: String(host || '').trim(),
+        port: parseInt(port || 0)
+    };
+    
+    const errors = validateSMTPConfig(config);
+    
+    res.json({
+        valid: errors.length === 0,
+        errors,
+        config: errors.length === 0 ? {
+            email: config.email,
+            host: config.host,
+            port: config.port,
+            secure: config.port === 465
+        } : null
     });
 });
 
