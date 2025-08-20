@@ -537,4 +537,8 @@ app.listen(PORT, () => {
     logger.info(`📊 Health check: http://localhost:${PORT}/health`);
     logger.info(`📚 API docs: http://localhost:${PORT}/docs`);
     logger.info(`💾 Memory limit: ${Math.round(process.memoryUsage().heapTotal / 1024 / 1024)}MB`);
+<<<<<<< HEAD
 });
+=======
+});
+>>>>>>> 75fd9edc7d367a66c1c4bcbe9b3b72993519594b
