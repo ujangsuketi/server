@@ -2,8 +2,13 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+# Tambah build tools kalau perlu (optional, test dulu tanpa ini)
+RUN apk add --no-cache python3 make g++ git
+
 COPY package*.json ./
-RUN npm ci --only=production
+
+# Ganti ke --omit=dev
+RUN npm ci --omit=dev
 
 COPY . .
 
