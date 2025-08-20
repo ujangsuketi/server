@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const dns = require('dns').promises;
@@ -10,6 +11,31 @@ const PORT = process.env.PORT || 3001;
 
 // Cache untuk MX record lookups (TTL 1 jam)
 const mxCache = new NodeCache({ stdTTL: 3600 });
+
+// Utility function untuk filter duplikat email (case-insensitive)
+function filterDuplicateEmails(emails) {
+    const seen = new Set();
+    const uniqueEmails = [];
+    const duplicates = [];
+
+    emails.forEach(email => {
+        const normalizedEmail = email.trim().toLowerCase();
+        if (seen.has(normalizedEmail)) {
+            duplicates.push(email.trim());
+        } else {
+            seen.add(normalizedEmail);
+            uniqueEmails.push(email.trim());
+        }
+    });
+
+    return {
+        uniqueEmails,
+        duplicates,
+        totalOriginal: emails.length,
+        totalUnique: uniqueEmails.length,
+        totalDuplicates: duplicates.length
+    };
+}
 
 // Rate limiting yang lebih longgar untuk batch processing
 const limiter = rateLimit({
@@ -47,7 +73,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-// API documentation endpoint
+    // API documentation endpoint
 app.get('/docs', (req, res) => {
     res.json({
         endpoints: {
@@ -64,16 +90,27 @@ app.get('/docs', (req, res) => {
             '/validate-batch': {
                 method: 'POST',
                 description: 'Validate emails in batch (max 10000 per request)',
-                body: { emails: ['email1@example.com', 'email2@example.com'] },
-                response: 'JSON array of validation results'
+                body: { 
+                    emails: ['email1@example.com', 'email2@example.com'],
+                    filterDuplicates: false // optional, default: false
+                },
+                response: 'JSON array of validation results with optional duplicate filter info'
             },
             '/validate-stream': {
                 method: 'GET',
                 description: 'Validate emails with Server-Sent Events (max 1000 per request)',
                 parameters: {
-                    emails: 'comma-separated email list via query string'
+                    emails: 'comma-separated email list via query string',
+                    filterDuplicates: 'boolean parameter to filter duplicates (true/false)'
                 },
-                response: 'Server-Sent Events stream'
+                response: 'Server-Sent Events stream with optional duplicate_info event'
+            }
+        },
+        features: {
+            duplicateFilter: {
+                description: 'Filter duplicate emails (case-insensitive)',
+                usage: 'Set filterDuplicates=true in requests',
+                behavior: 'Removes duplicate emails before validation, returns duplicate info'
             }
         },
         rateLimit: {
@@ -151,7 +188,7 @@ async function validateEmail(email) {
 
 // Batch validation endpoint untuk jumlah besar dengan chunking
 app.post('/validate-batch', async (req, res) => {
-    const { emails } = req.body;
+    const { emails, filterDuplicates = false } = req.body;
     
     if (!emails || !Array.isArray(emails) || emails.length === 0) {
         return res.status(400).json({ 
@@ -167,14 +204,23 @@ app.post('/validate-batch', async (req, res) => {
     }
 
     try {
+        let emailsToProcess = emails;
+        let duplicateInfo = null;
+
+        // Filter duplikat jika diminta
+        if (filterDuplicates) {
+            duplicateInfo = filterDuplicateEmails(emails);
+            emailsToProcess = duplicateInfo.uniqueEmails;
+        }
+
         const results = [];
         const CONCURRENCY_LIMIT = 100; // lebih agresif untuk kecepatan
         
-        console.log(`Processing ${emails.length} emails in batches...`);
+        console.log(`Processing ${emailsToProcess.length} emails in batches...`);
         
         // Process in chunks to avoid memory issues
-        for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
-            const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
+        for (let i = 0; i < emailsToProcess.length; i += CONCURRENCY_LIMIT) {
+            const chunk = emailsToProcess.slice(i, i + CONCURRENCY_LIMIT);
             const chunkResults = await Promise.allSettled(
                 chunk.map(email => validateEmail(email.trim()))
             );
@@ -194,10 +240,10 @@ app.post('/validate-batch', async (req, res) => {
             results.push(...processedResults);
             
             // Log progress
-            console.log(`Processed ${Math.min(i + CONCURRENCY_LIMIT, emails.length)}/${emails.length} emails`);
+            console.log(`Processed ${Math.min(i + CONCURRENCY_LIMIT, emailsToProcess.length)}/${emailsToProcess.length} emails`);
         }
 
-        res.json({
+        const response = {
             total: results.length,
             results,
             summary: {
@@ -206,7 +252,14 @@ app.post('/validate-batch', async (req, res) => {
                 invalid_format: results.filter(r => r.result === 'invalid_format').length,
                 error: results.filter(r => r.result === 'error').length
             }
-        });
+        };
+
+        // Tambahkan info duplikat jika filtering diaktifkan
+        if (filterDuplicates && duplicateInfo) {
+            response.duplicateFilter = duplicateInfo;
+        }
+
+        res.json(response);
     } catch (error) {
         console.error('Error in validate-batch:', error);
         res.status(500).json({ error: 'Internal server error', details: error.message });
@@ -216,11 +269,12 @@ app.post('/validate-batch', async (req, res) => {
 // Streaming endpoint untuk jumlah besar dengan chunking
 app.get('/validate-stream', async (req, res) => {
     const emails = req.query.emails?.split(',') || [];
+    const filterDuplicates = req.query.filterDuplicates === 'true';
     
     if (!emails || !Array.isArray(emails) || emails.length === 0) {
         return res.status(400).json({ 
             error: 'emails must be a comma-separated array via query string',
-            example: '/validate-stream?emails=test@example.com,test2@example.com'
+            example: '/validate-stream?emails=test@example.com,test2@example.com&filterDuplicates=true'
         });
     }
 
@@ -236,10 +290,22 @@ app.get('/validate-stream', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.flushHeaders();
 
+    let emailsToProcess = emails;
+    let duplicateInfo = null;
+
+    // Filter duplikat jika diminta
+    if (filterDuplicates) {
+        duplicateInfo = filterDuplicateEmails(emails);
+        emailsToProcess = duplicateInfo.uniqueEmails;
+        
+        // Kirim info duplikat sebagai event pertama
+        res.write(`event: duplicate_info\ndata: ${JSON.stringify(duplicateInfo)}\n\n`);
+    }
+
     const CONCURRENCY_LIMIT = 50;
     const DELAY_MS = 5; // lebih cepat
     
-    console.log(`Mulai memvalidasi ${emails.length} email dengan streaming`);
+    console.log(`Mulai memvalidasi ${emailsToProcess.length} email dengan streaming`);
     
     try {
         const processChunk = async (chunk) => {
@@ -265,12 +331,12 @@ app.get('/validate-stream', async (req, res) => {
         };
 
         // Process in chunks
-        for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
-            const chunk = emails.slice(i, i + CONCURRENCY_LIMIT);
+        for (let i = 0; i < emailsToProcess.length; i += CONCURRENCY_LIMIT) {
+            const chunk = emailsToProcess.slice(i, i + CONCURRENCY_LIMIT);
             await processChunk(chunk);
             
             // Small delay to prevent overwhelming
-            if (i + CONCURRENCY_LIMIT < emails.length) {
+            if (i + CONCURRENCY_LIMIT < emailsToProcess.length) {
                 await new Promise(r => setTimeout(r, DELAY_MS));
             }
         }
