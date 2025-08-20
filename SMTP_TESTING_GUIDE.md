@@ -12,7 +12,7 @@ Telah ditambahkan fitur baru untuk testing SMTP configuration dengan bounce chec
 ```json
 {
   "email": "info@asdasdf.site",
-  "password": "2bUQEqjO_bsx",
+  "password": "2bUQEqO_bsx",
   "host": "mail.asdasdf.site",
   "port": 465
 }
