@@ -517,6 +517,37 @@ app.post('/export-unique-emails', (req, res) => {
     });
 });
 
+// Secure login endpoint with environment variables
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    
+    // Get credentials from environment variables
+    const adminUsername = process.env.ADMIN_USERNAME;
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    const userUsername = process.env.USER_USERNAME;
+    const userPassword = process.env.USER_PASSWORD;
+    
+    // Validate credentials
+    if (username === adminUsername && password === adminPassword) {
+        res.json({
+            success: true,
+            message: 'Login successful',
+            user: { username, role: 'admin' }
+        });
+    } else if (username === userUsername && password === userPassword) {
+        res.json({
+            success: true,
+            message: 'Login successful',
+            user: { username, role: 'user' }
+        });
+    } else {
+        res.status(401).json({
+            success: false,
+            message: 'Invalid username or password'
+        });
+    }
+});
+
 app.get('/ping', (req, res) => {
     res.json({
         message: 'Server aktif dan siap digunakan',
