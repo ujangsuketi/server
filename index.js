@@ -550,7 +550,7 @@ app.post('/login', (req, res) => {
 
 app.get('/ping', (req, res) => {
     res.json({
-        message: 'Server aktif dan siap digunakan',
+        message: 'Server actived',
         timestamp: new Date().toISOString()
     });
 });
